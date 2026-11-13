@@ -75,7 +75,6 @@ st.markdown(
         margin-bottom: 0.8rem;
     }
 
-
     /* Metric label ("ELA") */
     [data-testid="stMetricLabel"] p {
         font-size: 0.95rem !important;
@@ -115,87 +114,122 @@ st.markdown(
         font-weight: 700 !important;
     }
 
-    [data-testid="stMetricValue"] {
-        color: #000000 !important;
-        font-weight: 700 !important;
-    }
     /* Hide the min/max range numbers below the slider track */
     [data-testid="stSliderTickBar"],
     [data-testid="stTickBar"] {
-    display: none !important;
+        display: none !important;
     }
-    /* Dark gray slider titles ("Temperature Change (°C)", "Precipitation Change (%)") */
-[data-testid="stWidgetLabel"],
-[data-testid="stWidgetLabel"] p,
-[data-testid="stWidgetLabel"] label {
-    color: #333333 !important;
-    opacity: 1 !important;
-}
-/* Dark gray sidebar heading ("Climate Parameters") and slider titles */
-[data-testid="stSidebar"] h3,
-[data-testid="stWidgetLabel"],
-[data-testid="stWidgetLabel"] p,
-[data-testid="stWidgetLabel"] label {
-    color: #333333 !important;
-    opacity: 1 !important;
-}
+
+    /* Dark gray sidebar heading ("Climate Parameters") and slider titles */
+    [data-testid="stSidebar"] h3,
+    [data-testid="stWidgetLabel"],
+    [data-testid="stWidgetLabel"] p,
+    [data-testid="stWidgetLabel"] label {
+        color: #333333 !important;
+        opacity: 1 !important;
+    }
     </style>
     """,
     unsafe_allow_html=True
 )
+
 # --- Render Title ---
 st.markdown('<div class="retro-title">South Cascade Glacier</div>', unsafe_allow_html=True)
 
-# --- Sidebar Sliders ---
+# --- Load Basemap & Rasters ---
+@st.cache_data
+def load_basemap():
+    return Image.open("SouthCascades.png")
+
+@st.cache_data
+def load_rasters():
+    with rasterio.open("SouthCascadesBEDROCK.tif") as src_bed:
+        bedrock = src_bed.read(1).astype(float)
+        bounds = src_bed.bounds  # (left, bottom, right, top)
+        if src_bed.nodata is not None:
+            bedrock[bedrock == src_bed.nodata] = np.nan
+
+    with rasterio.open("thickness.tif") as src_thick:
+        thickness = src_thick.read(1).astype(float)
+        if src_thick.nodata is not None:
+            thickness[thickness == src_thick.nodata] = np.nan
+
+    # Clean out zero or negative noise so only actual ice remains
+    thickness[thickness <= 0] = np.nan
+    return bedrock, thickness, bounds
+
+def compute_glacier_geometry(bedrock, base_thickness, ela, base_ela=1875.0):
+    adj_thickness = base_thickness.copy()
+
+    # --- PLACEHOLDER FOR FUTURE EXTENT / GEOMETRY UPDATES ---
+    # Modify adj_thickness here when modeling advance/retreat
+    # adj_thickness[adj_thickness <= 0] = np.nan
+    # --------------------------------------------------------
+
+    ice_mask = ~np.isnan(adj_thickness) & (adj_thickness > 0)
+    surface_dem = np.where(ice_mask, bedrock + adj_thickness, np.nan)
+    return adj_thickness, surface_dem, ice_mask
+
+# 1. Load basemap, bedrock DEM, and glacier thickness DEM
+basemap_img = load_basemap()
+bedrock, base_thickness, bounds = load_rasters()
+map_extent = [bounds.left, bounds.right, bounds.bottom, bounds.top]
+
+# 2. Sidebar Controls & ELA Calculation
 st.sidebar.markdown("### Climate Parameters")
 delta_t = st.sidebar.slider("Temperature Change (°C)", min_value=-2.0, max_value=4.0, value=0.0, step=0.2)
 delta_p = st.sidebar.slider("Precipitation Change (%)", min_value=-40, max_value=40, value=0, step=5)
 
-# --- Load Basemap & DEM ---
-@st.cache_data
-def load_data():
-    basemap = Image.open("SouthCascades.png")
-    
-    with rasterio.open("SouthCascadesBEDROCK.tif") as src:
-        dem = src.read(1).astype(float)
-        if src.nodata is not None:
-            dem[dem == src.nodata] = np.nan
-        extent = [src.bounds.left, src.bounds.right, src.bounds.bottom, src.bounds.top]
-        
-    return basemap, dem, extent
+base_ela = 1875.0
+lapse_rate = 0.0065
+new_ela = base_ela + (delta_t / lapse_rate) - (delta_p * 2.5)
 
-basemap_img, dem_data, map_extent = load_data()
+st.sidebar.metric("ELA", f"{new_ela:.0f} m", f"{new_ela - base_ela:+.0f} m")
 
-# --- Glaciology Calculations ---
-BASE_ELA = 1675        # Baseline ELA (meters)
-LAPSE_RATE = 0.0065    # 6.5°C per 1,000 m
-PRECIP_FACTOR = 50     # ~50 m shift per 10% precip change
-
-new_ela = BASE_ELA + (delta_t / LAPSE_RATE) - ((delta_p / 100.0) * PRECIP_FACTOR)
-st.sidebar.metric("ELA", f"{int(new_ela)} m")
-
-# Get the exact native pixel dimensions of your basemap PNG
-img_w, img_h = basemap_img.size
-native_dpi = 150
-
-# Set figsize so (figsize * native_dpi) equals your exact image pixel dimensions
-fig, ax = plt.subplots(figsize=(img_w / native_dpi, img_h / native_dpi), dpi=native_dpi)
-fig.patch.set_facecolor("#FFFFFF")
-
-ax.imshow(basemap_img, extent=map_extent)
-
-ax.contour(
-    dem_data, 
-    levels=[new_ela], 
-    colors=["crimson"], 
-    linewidths=2.5, 
-    linestyles="solid", 
-    extent=map_extent, 
-    origin="upper"
+# 3. Compute glacier geometry & masked surface DEM
+adj_thickness, surface_dem, ice_mask = compute_glacier_geometry(
+    bedrock, base_thickness, new_ela, base_ela=base_ela
 )
+
+# 4. Render Map
+fig, ax = plt.subplots(figsize=(10, 10), dpi=150)
+
+# Basemap
+ax.imshow(basemap_img, extent=map_extent, origin="upper")
+
+# Semi-transparent glacier thickness overlay
+if np.any(ice_mask):
+    ax.imshow(
+        adj_thickness,
+        extent=map_extent,
+        origin="upper",
+        cmap="Blues",
+        alpha=0.55,
+        vmin=0,
+        vmax=np.nanmax(base_thickness),
+    )
+
+    # Crisp glacier margin outline
+    ax.contour(
+        ice_mask.astype(int),
+        levels=[0.5],
+        colors="#003366",
+        linewidths=1.0,
+        extent=map_extent,
+        origin="upper",
+    )
+
+    # ELA contour constrained strictly to the glacier footprint
+    if np.nanmin(surface_dem) <= new_ela <= np.nanmax(surface_dem):
+        ax.contour(
+            surface_dem,
+            levels=[new_ela],
+            colors="crimson",
+            linewidths=2.2,
+            extent=map_extent,
+            origin="upper",
+        )
 
 ax.set_axis_off()
 plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
-
-# Render at exact 1:1 pixel resolution
-st.pyplot(fig, width="content")
+st.pyplot(fig, use_container_width=True)
