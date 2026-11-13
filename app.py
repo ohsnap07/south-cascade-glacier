@@ -152,7 +152,7 @@ def load_data():
 basemap_img, dem_data, map_extent = load_data()
 
 # --- Glaciology Calculations ---
-BASE_ELA = 1875        # Baseline ELA (meters)
+BASE_ELA = 1675        # Baseline ELA (meters)
 LAPSE_RATE = 0.0065    # 6.5°C per 1,000 m
 PRECIP_FACTOR = 50     # ~50 m shift per 10% precip change
 
