@@ -124,6 +124,21 @@ st.markdown(
     [data-testid="stTickBar"] {
     display: none !important;
     }
+    /* Dark gray slider titles ("Temperature Change (°C)", "Precipitation Change (%)") */
+[data-testid="stWidgetLabel"],
+[data-testid="stWidgetLabel"] p,
+[data-testid="stWidgetLabel"] label {
+    color: #333333 !important;
+    opacity: 1 !important;
+}
+/* Dark gray sidebar heading ("Climate Parameters") and slider titles */
+[data-testid="stSidebar"] h3,
+[data-testid="stWidgetLabel"],
+[data-testid="stWidgetLabel"] p,
+[data-testid="stWidgetLabel"] label {
+    color: #333333 !important;
+    opacity: 1 !important;
+}
     </style>
     """,
     unsafe_allow_html=True
