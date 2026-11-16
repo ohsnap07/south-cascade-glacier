@@ -314,7 +314,7 @@ delta_p = st.sidebar.slider("Precipitation Change (%)", min_value=-40, max_value
 base_ela = 1875.0          # Baseline equilibrium line altitude (m)
 BASE_BW = 3.23              # Baseline winter balance at ELA (m ice equivalent). CALCULATED FROM 2012-2022 FIELD MEASUREMENTS AT STATION C (1900m)
 
-DBW_DZ = 0.0055            # Winter balance vertical gradient, db_w/dz (m i.e. / m)
+DBW_DZ = 0.0033            # Winter balance vertical gradient, db_w/dz (m i.e. / m)
 DR_DZ = -0.015             # Net radiation vertical gradient, dR/dz (W / m^3)
 DTA_DZ = -0.0065           # Air temperature lapse rate, dT_a/dz (°C / m)
 
@@ -346,6 +346,9 @@ adj_thickness, surface_dem, ice_mask = compute_glacier_geometry(
 )
 
 # 4. Render Map
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+from matplotlib.lines import Line2D
+
 fig, ax = plt.subplots(figsize=(10, 10), dpi=150)
 
 # Basemap
@@ -353,12 +356,12 @@ ax.imshow(basemap_img, extent=map_extent, origin="upper")
 
 # Semi-transparent glacier thickness overlay
 if np.any(ice_mask):
-    ax.imshow(
+    thickness_im = ax.imshow(
         adj_thickness,
         extent=map_extent,
         origin="upper",
         cmap="Blues",
-        alpha=0.55,
+        alpha=0.65,
         vmin=0,
         vmax=np.nanmax(base_thickness),
     )
@@ -383,6 +386,43 @@ if np.any(ice_mask):
             extent=map_extent,
             origin="upper",
         )
+
+    # Inset Ice Thickness Colorbar Legend inside the visible right-hand frame
+    cax = inset_axes(
+        ax,
+        width="3.2%",
+        height="26%",
+        loc="upper left",
+        bbox_to_anchor=(0.435, -0.08, 1, 1),
+        bbox_transform=ax.transAxes,
+        borderpad=0,
+    )
+    cbar = fig.colorbar(thickness_im, cax=cax)
+    cbar.set_label("Ice Thickness (m)", fontsize=8.5, fontweight="bold", color="#000000", labelpad=6)
+    cbar.ax.tick_params(labelsize=7.5, colors="#000000")
+    cbar.outline.set_edgecolor("#333333")
+    cbar.outline.set_linewidth(0.8)
+
+    # White backing plate behind the inset colorbar for readability over terrain
+    cax.patch.set_facecolor("white")
+    cax.patch.set_alpha(0.88)
+
+    # Compact line legend for ELA & Glacier Margin below the colorbar
+    legend_handles = [
+        Line2D([0], [0], color="crimson", lw=2.2, label=f"ELA ({new_ela:.0f} m)"),
+        Line2D([0], [0], color="#003366", lw=1.2, label="Glacier Margin"),
+    ]
+    leg = ax.legend(
+        handles=legend_handles,
+        loc="lower left",
+        bbox_to_anchor=(0.425, 0.06),
+        frameon=True,
+        facecolor="white",
+        framealpha=0.88,
+        edgecolor="#808080",
+        fontsize=6,
+    )
+    leg.get_frame().set_linewidth(0.8)
 
 ax.set_axis_off()
 buf = io.BytesIO()
