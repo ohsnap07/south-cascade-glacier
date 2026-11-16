@@ -316,7 +316,7 @@ BASE_BW = 3.23              # Baseline winter balance at ELA (m ice equivalent).
 
 DBW_DZ = 0.0033            # Winter balance vertical gradient, db_w/dz (m i.e. / m)
 DR_DZ = -0.015             # Net radiation vertical gradient, dR/dz (W / m^3)
-DTA_DZ = -0.0065           # Air temperature lapse rate, dT_a/dz (°C / m)
+DTA_DZ = -0.0039           # Air temperature lapse rate, dT_a/dz (°C / m)
 
 GAMMA = 12                # Turbulent heat transfer coefficient (W / (m^2 * °C))
 T_MELT = 86400 * 100       # Duration of ablation season, t (s, e.g., 100 melt days)
