@@ -188,6 +188,7 @@ def compute_glacier_geometry(bedrock, base_thickness, ela, base_ela=1875.0):
 
     RHO_ICE = 900.0        # Bulk glacier ice density (kg / m^3)
     G = 9.81               # Gravitational acceleration (m / s^2)
+    ELEV_SPAN = 440.0      # Approx vertical relief of South Cascade Glacier (~1640 m to 2080 m)
 
     initial_mask = ~np.isnan(base_thickness) & (base_thickness > 0)
 
@@ -197,12 +198,12 @@ def compute_glacier_geometry(bedrock, base_thickness, ela, base_ela=1875.0):
         dx = (xmax - xmin) / float(ncols)
         dy = (ymax - ymin) / float(nrows)
 
-        # Build UTM coordinate grids for every pixel
+        # Build UTM coordinate grids (EPSG:32610) for every pixel
         x_utm = xmin + (np.arange(ncols) + 0.5) * dx
         y_utm = ymax - (np.arange(nrows) + 0.5) * dy
         X_grid, Y_grid = np.meshgrid(x_utm, y_utm)
 
-        # 1. Load manual centerline from QGIS GeoJSON export (must be in same folder as app.py)
+        # 1. Load manual 2D centerline from QGIS GeoJSON export (located alongside app.py)
         with open("centerline.geojson") as f:
             gj = json.load(f)
         coords = gj["features"][0]["geometry"]["coordinates"]
@@ -214,14 +215,14 @@ def compute_glacier_geometry(bedrock, base_thickness, ela, base_ela=1875.0):
         seg_lens = np.hypot(seg_vecs[:, 0], seg_vecs[:, 1])
         cum_s = np.concatenate([[0.0], np.cumsum(seg_lens)])
 
-        # Automatically detect L_0 where your drawn line crosses the modern terminus edge
+        # Automatically detect L_0 where the drawn centerline crosses the modern terminus edge
         pt_r = np.clip(((ymax - pts[:, 1]) / dy).astype(int), 0, nrows - 1)
         pt_c = np.clip(((pts[:, 0] - xmin) / dx).astype(int), 0, ncols - 1)
         on_ice = initial_mask[pt_r, pt_c]
         last_ice_idx = int(np.where(on_ice)[0][-1]) if np.any(on_ice) else len(pts) - 1
         L_0 = float(cum_s[last_ice_idx])
 
-        # 2. Project every pixel (X_grid, Y_grid) onto the centerline -> along-flow `s` & cross-valley `d_perp`
+        # 2. Project every raster pixel onto the centerline -> along-flow `s` & cross-valley `d_perp`
         best_dist2 = np.full(base_thickness.shape, np.inf)
         s_grid = np.zeros(base_thickness.shape)
         for i in range(len(seg_lens)):
@@ -238,7 +239,7 @@ def compute_glacier_geometry(bedrock, base_thickness, ela, base_ela=1875.0):
 
         d_perp = np.sqrt(best_dist2)
 
-#   3. Compute slope-adjusted effective basal shear stress along the glacier
+        # 3. Compute slope-adjusted effective basal shear stress: tau_eff = rho * g * h * sin(alpha)
         base_surface = bedrock + np.nan_to_num(base_thickness, nan=0.0)
         dz_dy, dz_dx = np.gradient(base_surface, dy, dx)
         sin_alpha = np.hypot(dz_dx, dz_dy) / np.sqrt(1.0 + dz_dx**2 + dz_dy**2)
@@ -248,58 +249,30 @@ def compute_glacier_geometry(bedrock, base_thickness, ela, base_ela=1875.0):
         # 4. Solve for L_new directly where parabolic centerline height h(s) hits 0
         coeff_2d = (2.0 * tau_eff) / (RHO_ICE * G)
         coeff_center = (2.0 * tau_mean) / (RHO_ICE * G)
+        H_0 = np.sqrt(coeff_center * L_0)
+
+        # Relief-scaled thickness coupling to ELA shift
         delta_ela = ela - base_ela
+        relief_factor = np.maximum(1.0 - 2.2 * (delta_ela / ELEV_SPAN), 0.0)
+        H_new = H_0 * np.sqrt(relief_factor)
 
-        if delta_ela > 0:
-            # --- RETREAT: constant accumulation area ratio (AAR) ---
-            z0 = bedrock + np.nan_to_num(base_thickness, nan=0.0)
-            A_tot = float(initial_mask.sum())
-            AAR_0 = np.sum(initial_mask & (z0 > base_ela)) / A_tot
-
-            # Accumulation area above the new ELA, scaled by constant AAR -> target total area
-            A_acc_new = float(np.sum(initial_mask & (z0 > ela)))
-            A_target = min(A_acc_new / max(AAR_0, 1e-6), A_tot)
-
-            # Cumulative glacier area from the head (s = 0) down-flow
-            s_ice = np.sort(s_grid[initial_mask])
-            cum_area = np.arange(1, s_ice.size + 1, dtype=float)
-
-            if A_target <= 0:
-                L_new = 0.0
-            else:
-                L_new = float(np.interp(A_target, cum_area, s_ice))
-        else:
-            # --- ADVANCE (or no change): geometric bed-slope scaling ---
-            # Terminus moves down the centerline bed until it reaches (terminus elevation + delta_ela)
-            bed_center = bedrock[pt_r, pt_c]
-            z_target = bed_center[last_ice_idx] + delta_ela   # delta_ela <= 0 -> lower
-
-            L_new = float(cum_s[-1])  # default: runs to end of centerline
-            for i in range(last_ice_idx + 1, len(pts)):
-                if bed_center[i] <= z_target:
-                    # linear interpolation between point i-1 and i
-                    z_a, z_b = bed_center[i - 1], bed_center[i]
-                    f = (z_a - z_target) / max(z_a - z_b, 1e-6)
-                    L_new = float(cum_s[i - 1] + f * seg_lens[i - 1])
-                    break
-            if delta_ela == 0:
-                L_new = L_0
-
+        # Exact length where h(s) = sqrt(coeff_center * (L_new - s)) reaches 0, capped at centerline end
+        L_new = (H_new ** 2) / max(coeff_center, 1e-6)
         L_new = float(np.clip(L_new, 0.0, cum_s[-1]))
 
         h_0 = np.sqrt(np.maximum(coeff_2d * (L_0 - s_grid), 0.0))
         h_new = np.sqrt(np.maximum(coeff_2d * (L_new - s_grid), 0.0))
         delta_h = h_new - h_0
 
-        # 5. Apply perturbation inside initial_mask, and grow advancing tongue ONLY along the centerline trough
+        # 5. Apply perturbation inside initial_mask and grow tapered advancing tongue along centerline
         max_half_width = float(np.nanpercentile(d_perp[initial_mask], 95))
 
-        # Taper half-width parabolically toward zero at the new terminus (s = L_new)
+        # Taper valley half-width parabolically down to zero at the new terminus (s = L_new)
         taper_factor = np.sqrt(np.clip((L_new - s_grid) / max(L_new - L_0 * 0.85, 1.0), 0.0, 1.0))
         local_half_width = max_half_width * taper_factor
         in_valley_corridor = (s_grid >= 0.0) & (s_grid < L_new) & (d_perp <= local_half_width)
 
-        # Sample centerline bed elevation along s and add parabolic cross-valley dome
+        # Sample centerline bed elevation along s and apply parabolic cross-valley dome
         center_r = np.clip(((ymax - pts[:, 1]) / dy).astype(int), 0, nrows - 1)
         center_c = np.clip(((pts[:, 0] - xmin) / dx).astype(int), 0, ncols - 1)
         bed_along_s = np.interp(s_grid, cum_s, bedrock[center_r, center_c])
@@ -308,20 +281,6 @@ def compute_glacier_geometry(bedrock, base_thickness, ela, base_ela=1875.0):
         h_parabolic_new = np.sqrt(np.maximum(coeff_center * (L_new - s_grid), 0.0)) * np.sqrt(cross_dome)
         advance_surf = bed_along_s + h_parabolic_new
         advance_thick = advance_surf - bedrock
-
-        adj_thickness = np.where(
-            initial_mask,
-            base_thickness + delta_h,
-            np.where(in_valley_corridor & (s_grid >= L_0 * 0.85), advance_thick, np.nan),
-        )
-        adj_thickness[(adj_thickness <= 0) | (s_grid >= L_new)] = np.nan
-
-        # Keep only the single contiguous glacier connected to the main body
-        valid = ~np.isnan(adj_thickness) & (adj_thickness > 0)
-        labeled, num_features = label(valid)
-        if num_features > 1:
-            main_labels = np.unique(labeled[initial_mask & valid])
-            adj_thickness[~np.isin(labeled, main_labels)] = np.nan
 
         adj_thickness = np.where(
             initial_mask,
