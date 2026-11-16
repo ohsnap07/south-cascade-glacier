@@ -1,8 +1,12 @@
+import io
+import os
 import streamlit as st
 import numpy as np
 import rasterio
 import matplotlib.pyplot as plt
 from PIL import Image
+from scipy.ndimage import distance_transform_edt
+import json
 
 st.set_page_config(
     page_title="South Cascade Glacier",
@@ -29,16 +33,19 @@ st.markdown(
         font-family: 'Arimo', Arial, sans-serif !important;
     }
 
-    /* Completely remove top header bar, Deploy button, settings menu, and sidebar arrows */
+    /* Completely remove top header bar, Deploy button, settings menu, sidebar arrows, and image fullscreen button */
     [data-testid="stHeader"],
     [data-testid="stToolbar"],
     [data-testid="stDecoration"],
     [data-testid="stSidebarCollapseButton"],
-    [data-testid="collapsedControl"] {
+    [data-testid="collapsedControl"],
+    [data-testid="StyledFullScreenButton"],
+    [data-testid="stFullScreenFrame"] button,
+    button[title="View fullscreen"] {
         display: none !important;
     }
 
-    /* Classic Windows 2000 / XP light grey sidebar */
+    /* Classic Windows 2000 / XP white sidebar with dark gray border */
     [data-testid="stSidebar"] {
         background-color: #ffffff;
         border-right: 2px solid #808080;
@@ -101,11 +108,24 @@ st.markdown(
         background-color: #B8B8B8 !important;
     }
 
-    div[data-baseweb="slider"] [role="slider"] {
+    /* Boxy retro slider handle with permanent drop shadow and no focus glow */
+    div[data-baseweb="slider"] [role="slider"],
+    div[data-baseweb="slider"] [role="slider"]:hover,
+    div[data-baseweb="slider"] [role="slider"]:focus,
+    div[data-baseweb="slider"] [role="slider"]:active,
+    div[data-baseweb="slider"] [role="slider"]:focus-visible {
         background-color: #000000 !important;
         border: 2px solid #FFFFFF !important;
         border-radius: 2px !important;
-        box-shadow: 1px 1px 0px #000000 !important;
+        box-shadow: 2px 2px 0px #808080 !important;
+        outline: none !important;
+    }
+
+    /* Strip focus outlines on wrapper divs WITHOUT wiping out the thumb's own shadow */
+    div[data-baseweb="slider"] div:not([role="slider"]):focus,
+    div[data-baseweb="slider"] div:not([role="slider"]):focus-visible {
+        outline: none !important;
+        box-shadow: none !important;
     }
 
     [data-testid="stSliderThumbValue"],
@@ -128,13 +148,15 @@ st.markdown(
         color: #333333 !important;
         opacity: 1 !important;
     }
+
+    /* Hide the delta indicator (+0 m / arrow) under the ELA metric */
+    [data-testid="stMetricDelta"] {
+        display: none !important;
+    }
     </style>
     """,
     unsafe_allow_html=True
 )
-
-# --- Render Title ---
-st.markdown('<div class="retro-title">South Cascade Glacier</div>', unsafe_allow_html=True)
 
 # --- Load Basemap & Rasters ---
 @st.cache_data
@@ -159,12 +181,161 @@ def load_rasters():
     return bedrock, thickness, bounds
 
 def compute_glacier_geometry(bedrock, base_thickness, ela, base_ela=1875.0):
+    import json
+    from scipy.ndimage import label
+
     adj_thickness = base_thickness.copy()
 
-    # --- PLACEHOLDER FOR FUTURE EXTENT / GEOMETRY UPDATES ---
-    # Modify adj_thickness here when modeling advance/retreat
-    # adj_thickness[adj_thickness <= 0] = np.nan
-    # --------------------------------------------------------
+    RHO_ICE = 900.0        # Bulk glacier ice density (kg / m^3)
+    G = 9.81               # Gravitational acceleration (m / s^2)
+
+    initial_mask = ~np.isnan(base_thickness) & (base_thickness > 0)
+
+    if np.any(initial_mask):
+        nrows, ncols = base_thickness.shape
+        xmin, xmax, ymin, ymax = map_extent
+        dx = (xmax - xmin) / float(ncols)
+        dy = (ymax - ymin) / float(nrows)
+
+        # Build UTM coordinate grids for every pixel
+        x_utm = xmin + (np.arange(ncols) + 0.5) * dx
+        y_utm = ymax - (np.arange(nrows) + 0.5) * dy
+        X_grid, Y_grid = np.meshgrid(x_utm, y_utm)
+
+        # 1. Load manual centerline from QGIS GeoJSON export (must be in same folder as app.py)
+        with open("centerline.geojson") as f:
+            gj = json.load(f)
+        coords = gj["features"][0]["geometry"]["coordinates"]
+        if isinstance(coords[0][0], list):
+            coords = coords[0]
+        pts = np.array([[c[0], c[1]] for c in coords], dtype=float)
+
+        seg_vecs = pts[1:] - pts[:-1]
+        seg_lens = np.hypot(seg_vecs[:, 0], seg_vecs[:, 1])
+        cum_s = np.concatenate([[0.0], np.cumsum(seg_lens)])
+
+        # Automatically detect L_0 where your drawn line crosses the modern terminus edge
+        pt_r = np.clip(((ymax - pts[:, 1]) / dy).astype(int), 0, nrows - 1)
+        pt_c = np.clip(((pts[:, 0] - xmin) / dx).astype(int), 0, ncols - 1)
+        on_ice = initial_mask[pt_r, pt_c]
+        last_ice_idx = int(np.where(on_ice)[0][-1]) if np.any(on_ice) else len(pts) - 1
+        L_0 = float(cum_s[last_ice_idx])
+
+        # 2. Project every pixel (X_grid, Y_grid) onto the centerline -> along-flow `s` & cross-valley `d_perp`
+        best_dist2 = np.full(base_thickness.shape, np.inf)
+        s_grid = np.zeros(base_thickness.shape)
+        for i in range(len(seg_lens)):
+            vx, vy = seg_vecs[i]
+            L2 = max(seg_lens[i] ** 2, 1e-6)
+            t = ((X_grid - pts[i, 0]) * vx + (Y_grid - pts[i, 1]) * vy) / L2
+            t_clamped = np.clip(t, 0.0, 1.0)
+            proj_x = pts[i, 0] + t_clamped * vx
+            proj_y = pts[i, 1] + t_clamped * vy
+            d2 = (X_grid - proj_x) ** 2 + (Y_grid - proj_y) ** 2
+            closer = d2 < best_dist2
+            best_dist2[closer] = d2[closer]
+            s_grid[closer] = cum_s[i] + t_clamped[closer] * seg_lens[i]
+
+        d_perp = np.sqrt(best_dist2)
+
+#   3. Compute slope-adjusted effective basal shear stress along the glacier
+        base_surface = bedrock + np.nan_to_num(base_thickness, nan=0.0)
+        dz_dy, dz_dx = np.gradient(base_surface, dy, dx)
+        sin_alpha = np.hypot(dz_dx, dz_dy) / np.sqrt(1.0 + dz_dx**2 + dz_dy**2)
+        tau_eff = np.clip(RHO_ICE * G * np.nan_to_num(base_thickness, nan=0.0) * sin_alpha, 4.0e4, 1.6e5)
+        tau_mean = float(np.nanmean(tau_eff[initial_mask]))
+
+        # 4. Solve for L_new directly where parabolic centerline height h(s) hits 0
+        coeff_2d = (2.0 * tau_eff) / (RHO_ICE * G)
+        coeff_center = (2.0 * tau_mean) / (RHO_ICE * G)
+        delta_ela = ela - base_ela
+
+        if delta_ela > 0:
+            # --- RETREAT: constant accumulation area ratio (AAR) ---
+            z0 = bedrock + np.nan_to_num(base_thickness, nan=0.0)
+            A_tot = float(initial_mask.sum())
+            AAR_0 = np.sum(initial_mask & (z0 > base_ela)) / A_tot
+
+            # Accumulation area above the new ELA, scaled by constant AAR -> target total area
+            A_acc_new = float(np.sum(initial_mask & (z0 > ela)))
+            A_target = min(A_acc_new / max(AAR_0, 1e-6), A_tot)
+
+            # Cumulative glacier area from the head (s = 0) down-flow
+            s_ice = np.sort(s_grid[initial_mask])
+            cum_area = np.arange(1, s_ice.size + 1, dtype=float)
+
+            if A_target <= 0:
+                L_new = 0.0
+            else:
+                L_new = float(np.interp(A_target, cum_area, s_ice))
+        else:
+            # --- ADVANCE (or no change): geometric bed-slope scaling ---
+            # Terminus moves down the centerline bed until it reaches (terminus elevation + delta_ela)
+            bed_center = bedrock[pt_r, pt_c]
+            z_target = bed_center[last_ice_idx] + delta_ela   # delta_ela <= 0 -> lower
+
+            L_new = float(cum_s[-1])  # default: runs to end of centerline
+            for i in range(last_ice_idx + 1, len(pts)):
+                if bed_center[i] <= z_target:
+                    # linear interpolation between point i-1 and i
+                    z_a, z_b = bed_center[i - 1], bed_center[i]
+                    f = (z_a - z_target) / max(z_a - z_b, 1e-6)
+                    L_new = float(cum_s[i - 1] + f * seg_lens[i - 1])
+                    break
+            if delta_ela == 0:
+                L_new = L_0
+
+        L_new = float(np.clip(L_new, 0.0, cum_s[-1]))
+
+        h_0 = np.sqrt(np.maximum(coeff_2d * (L_0 - s_grid), 0.0))
+        h_new = np.sqrt(np.maximum(coeff_2d * (L_new - s_grid), 0.0))
+        delta_h = h_new - h_0
+
+        # 5. Apply perturbation inside initial_mask, and grow advancing tongue ONLY along the centerline trough
+        max_half_width = float(np.nanpercentile(d_perp[initial_mask], 95))
+
+        # Taper half-width parabolically toward zero at the new terminus (s = L_new)
+        taper_factor = np.sqrt(np.clip((L_new - s_grid) / max(L_new - L_0 * 0.85, 1.0), 0.0, 1.0))
+        local_half_width = max_half_width * taper_factor
+        in_valley_corridor = (s_grid >= 0.0) & (s_grid < L_new) & (d_perp <= local_half_width)
+
+        # Sample centerline bed elevation along s and add parabolic cross-valley dome
+        center_r = np.clip(((ymax - pts[:, 1]) / dy).astype(int), 0, nrows - 1)
+        center_c = np.clip(((pts[:, 0] - xmin) / dx).astype(int), 0, ncols - 1)
+        bed_along_s = np.interp(s_grid, cum_s, bedrock[center_r, center_c])
+
+        cross_dome = np.clip(1.0 - (d_perp / np.maximum(local_half_width, 1.0)) ** 2, 0.0, 1.0)
+        h_parabolic_new = np.sqrt(np.maximum(coeff_center * (L_new - s_grid), 0.0)) * np.sqrt(cross_dome)
+        advance_surf = bed_along_s + h_parabolic_new
+        advance_thick = advance_surf - bedrock
+
+        adj_thickness = np.where(
+            initial_mask,
+            base_thickness + delta_h,
+            np.where(in_valley_corridor & (s_grid >= L_0 * 0.85), advance_thick, np.nan),
+        )
+        adj_thickness[(adj_thickness <= 0) | (s_grid >= L_new)] = np.nan
+
+        # Keep only the single contiguous glacier connected to the main body
+        valid = ~np.isnan(adj_thickness) & (adj_thickness > 0)
+        labeled, num_features = label(valid)
+        if num_features > 1:
+            main_labels = np.unique(labeled[initial_mask & valid])
+            adj_thickness[~np.isin(labeled, main_labels)] = np.nan
+
+        adj_thickness = np.where(
+            initial_mask,
+            base_thickness + delta_h,
+            np.where(in_valley_corridor & (s_grid >= L_0 * 0.85), advance_thick, np.nan),
+        )
+        adj_thickness[(adj_thickness <= 0) | (s_grid >= L_new)] = np.nan
+
+        # Keep only the single contiguous glacier connected to the main body
+        valid = ~np.isnan(adj_thickness) & (adj_thickness > 0)
+        labeled, num_features = label(valid)
+        if num_features > 1:
+            main_labels = np.unique(labeled[initial_mask & valid])
+            adj_thickness[~np.isin(labeled, main_labels)] = np.nan
 
     ice_mask = ~np.isnan(adj_thickness) & (adj_thickness > 0)
     surface_dem = np.where(ice_mask, bedrock + adj_thickness, np.nan)
@@ -176,13 +347,37 @@ bedrock, base_thickness, bounds = load_rasters()
 map_extent = [bounds.left, bounds.right, bounds.bottom, bounds.top]
 
 # 2. Sidebar Controls & ELA Calculation
-st.sidebar.markdown("### Climate Parameters")
-delta_t = st.sidebar.slider("Temperature Change (°C)", min_value=-2.0, max_value=4.0, value=0.0, step=0.2)
-delta_p = st.sidebar.slider("Precipitation Change (%)", min_value=-40, max_value=40, value=0, step=5)
+st.sidebar.markdown("### South Cascade Glacier")
+temp = st.sidebar.slider("Temperature Change (°C)", min_value=-1.0, max_value=5.0, value=1.6, step=0.2)
+delta_p = st.sidebar.slider("Precipitation Change (m ice equivalent)", min_value=-40, max_value=40, value=0, step=5)
 
-base_ela = 1875.0
-lapse_rate = 0.0065
-new_ela = base_ela + (delta_t / lapse_rate) - (delta_p * 2.5)
+# --- Physical & Glaciological Constants (Kuhn ELA Perturbation Model) ---
+base_ela = 1875.0          # Baseline equilibrium line altitude (m)
+BASE_BW = 3.23              # Baseline winter balance at ELA (m ice equivalent). CALCULATED FROM 2012-2022 FIELD MEASUREMENTS AT STATION C (1900m)
+
+DBN_DZ = 0.0085            # Winter balance vertical gradient, db_w/dz (m i.e. / m)
+DR_DZ = -0.015             # Net radiation vertical gradient, dR/dz (W / m^3)
+DTA_DZ = -0.0065           # Air temperature lapse rate, dT_a/dz (°C / m)
+
+GAMMA = 12                # Turbulent heat transfer coefficient (W / (m^2 * °C))
+T_MELT = 86400 * 100       # Duration of ablation season, t (s, e.g., 100 melt days)
+L_FUSION = 3.34e5          # Latent heat of fusion of ice, L (J / kg)
+RHO_ICE = 917.0            # Density of ice (kg / m^3) to convert kg/m^2 -> m w.e.
+
+# Perturbations driven by sidebar sliders (plus radiation perturbation delta_R)
+delta_Ta = temp - 1.6                         # Air temperature change, δT_a (°C)
+delta_bw = BASE_BW * (delta_p / 100.0)     # Winter balance change, δb_w (m i.e.)
+delta_R = 0.0                              # Net radiation perturbation, δR (W / m^2)
+
+# --- Solved Equation for Δz_ela ---
+# Note: (T_MELT / (L_FUSION * RHO_ICE)) converts W/m^2 (J/(s*m^2)) over season t into m i.e.
+energy_to_mie = T_MELT / (L_FUSION * RHO_ICE)
+
+numerator = energy_to_mie * (delta_R + GAMMA * delta_Ta) - delta_bw
+denominator = DBN_DZ - energy_to_mie * (DR_DZ + GAMMA * DTA_DZ)
+
+delta_ela = numerator / denominator
+new_ela = base_ela + delta_ela
 
 st.sidebar.metric("ELA", f"{new_ela:.0f} m", f"{new_ela - base_ela:+.0f} m")
 
@@ -231,5 +426,13 @@ if np.any(ice_mask):
         )
 
 ax.set_axis_off()
-plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
-st.pyplot(fig, use_container_width=True)
+buf = io.BytesIO()
+fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", pad_inches=0)
+plt.close(fig)
+buf.seek(0)
+
+rendered_img = Image.open(buf)
+w, h = rendered_img.size
+trim = 50
+cropped_img = rendered_img.crop((500, trim, w - trim, h - trim))
+st.image(cropped_img, width=500)
