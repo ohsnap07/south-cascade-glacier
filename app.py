@@ -348,8 +348,8 @@ map_extent = [bounds.left, bounds.right, bounds.bottom, bounds.top]
 
 # 2. Sidebar Controls & ELA Calculation
 st.sidebar.markdown("### South Cascade Glacier")
-temp = st.sidebar.slider("Temperature Change (°C)", min_value=-1.0, max_value=5.0, value=1.6, step=0.2)
-delta_p = st.sidebar.slider("Precipitation Change (m ice equivalent)", min_value=-40, max_value=40, value=0, step=5)
+temp = st.sidebar.slider("Average Annual Air Temperature at ELA (°C)", min_value=0.0, max_value=4.0, value=1.6, step=0.2)
+delta_p = st.sidebar.slider("Precipitation Change (%)", min_value=-40, max_value=40, value=0, step=5)
 
 # --- Physical & Glaciological Constants (Kuhn ELA Perturbation Model) ---
 base_ela = 1875.0          # Baseline equilibrium line altitude (m)
