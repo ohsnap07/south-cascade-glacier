@@ -186,7 +186,7 @@ def compute_glacier_geometry(bedrock, base_thickness, ela, base_ela=1875.0):
 
     adj_thickness = base_thickness.copy()
 
-    RHO_ICE = 900.0        # Bulk glacier ice density (kg / m^3)
+    RHO_ICE = 917.0        # Bulk glacier ice density (kg / m^3)
     G = 9.81               # Gravitational acceleration (m / s^2)
     ELEV_SPAN = 440.0      # Approx vertical relief of South Cascade Glacier (~1640 m to 2080 m)
 
@@ -314,7 +314,7 @@ delta_p = st.sidebar.slider("Precipitation Change (%)", min_value=-40, max_value
 base_ela = 1875.0          # Baseline equilibrium line altitude (m)
 BASE_BW = 3.23              # Baseline winter balance at ELA (m ice equivalent). CALCULATED FROM 2012-2022 FIELD MEASUREMENTS AT STATION C (1900m)
 
-DBN_DZ = 0.0085            # Winter balance vertical gradient, db_w/dz (m i.e. / m)
+DBW_DZ = 0.0055            # Winter balance vertical gradient, db_w/dz (m i.e. / m)
 DR_DZ = -0.015             # Net radiation vertical gradient, dR/dz (W / m^3)
 DTA_DZ = -0.0065           # Air temperature lapse rate, dT_a/dz (°C / m)
 
@@ -333,7 +333,7 @@ delta_R = 0.0                              # Net radiation perturbation, δR (W 
 energy_to_mie = T_MELT / (L_FUSION * RHO_ICE)
 
 numerator = energy_to_mie * (delta_R + GAMMA * delta_Ta) - delta_bw
-denominator = DBN_DZ - energy_to_mie * (DR_DZ + GAMMA * DTA_DZ)
+denominator = DBW_DZ - energy_to_mie * (DR_DZ + GAMMA * DTA_DZ)
 
 delta_ela = numerator / denominator
 new_ela = base_ela + delta_ela
